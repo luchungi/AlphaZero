@@ -9,9 +9,9 @@ class ConnectXGame:
         winNumber: 2
     """
 
-    def __init__(self):
-        self.columns = 4
-        self.win = 2
+    def __init__(self, columns=4, win=2):
+        self.columns = columns
+        self.win = win
 
     def get_init_board(self):
         b = np.zeros((self.columns,), dtype=np.int16)

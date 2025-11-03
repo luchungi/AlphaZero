@@ -6,7 +6,7 @@ import torch
 import torch.optim as optim
 from tqdm import tqdm
 
-from sims.tree import MCTS
+from sims.tree_reference import MCTS
 
 class Trainer:
 

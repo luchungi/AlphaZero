@@ -1,41 +1,63 @@
 import torch
-import math
 import numpy as np
 
 class Node:
-    def __init__(self, prior, to_play):
-        self.visit_count = 0
-        self.to_play = to_play # which player is to play at this node
-        self.prior = prior
-        self.value_sum = 0
-        self.children = {}
-        self.state = None # only populated for expanded nodes
+    def __init__(self, prior):
+        self.visit_count = 0    # number of times node was visited
+        self.value_sum = 0      # sum of value evaluations
+        self.prior = prior      # prior probability of selecting this node based on policy network
+        self.state = None       # game state at this node
+        self.children = {}      # dictionary of child nodes keyed by action
 
-    def expanded(self):
-        return len(self.children) > 0
+    def update_state(self, state):
+        """
+        Update the state of the node.
+        """
+        self.state = state
 
     def value(self):
+        """
+        Calculate the average value of the node.
+        """
         if self.visit_count == 0:
             return 0
         return self.value_sum / self.visit_count
 
-    def select_action(self, temperature):
+    def expanded(self):
         """
-        Select action according to the visit count distribution and the temperature.
+        Check if the node has been expanded (i.e., has children).
         """
-        visit_counts = np.array([child.visit_count for child in self.children.values()])
-        actions = [action for action in self.children.keys()]
-        if temperature == 0:
-            action = actions[np.argmax(visit_counts)]
-        elif temperature == float("inf"):
-            action = np.random.choice(actions)
-        else:
-            # See paper appendix Data Generation
-            visit_count_distribution = visit_counts ** (1 / temperature)
-            visit_count_distribution = visit_count_distribution / sum(visit_count_distribution)
-            action = np.random.choice(actions, p=visit_count_distribution)
+        return len(self.children) > 0
 
-        return action
+    def expand(self, legal_actions, priors):
+        """
+        Expand the node by adding child nodes for each possible action.
+        """
+        for action in legal_actions:
+            if isinstance(action, torch.Tensor):
+                action = action.item()
+            self.children[action] = Node(priors[action])
+
+    def action_probs(self, temp=1):
+        """
+        Returns dictionary of visit counts for each child node with the action as key.
+        """
+        if self.expanded():
+            total_counts = sum(child.visit_count for child in self.children.values())
+            action_probs = {action: (child.visit_count / total_counts) ** (1 / temp)
+                            for action, child in self.children.items()}
+            return action_probs
+        else:
+            return {}
+
+    def best_action(self):
+        """
+        Returns action with the highest visit count among child nodes.
+        """
+        if self.expanded():
+            return max(self.children.items(), key=lambda item: item[1].visit_count)[0]
+        else:
+            return None
 
     def __repr__(self):
         """
@@ -44,110 +66,90 @@ class Node:
         prior = "{0:.2f}".format(self.prior)
         return "{} Prior: {} Count: {} Value: {}".format(self.state.__str__(), prior, self.visit_count, self.value())
 
-
 class MCTS:
-
+    '''
+    Monte Carlo Tree Search implementation for AlphaZero for two-player zero-sum games.
+    The actions vector contains the probability of all possible actions in the game including illegal moves.
+    The game function get_legal_actions returns the indices of legal moves in the current state.
+    Reward is between -1, 0, 1, with 1 being a win for the current player, -1 a loss, and 0 a draw.
+    Model should output a tuple of (action probabilities, value) given a state with value between -1 and 1.
+    '''
     def __init__(self, game, model, args):
         self.game = game
-        self.model = model
-        self.args = args
+        self.model = model # outputs action probabilities of all actions (including illegal ones)
+        self.args = args # exploration constant for UCB calculation, higher values encourage exploration
         self.c_puct = args['c_puct']
         self.num_simulations = args['num_simulations']
 
-    def run(self, state, to_play):
-
-        root = Node(0, to_play)
-
-        # EXPAND root
-        action_probs, _ = self.get_prob_and_value(state)
-        self.expand(root, state, to_play, action_probs)
-
-        for _ in range(self.num_simulations):
-            node = root
-            search_path = [node]
-
-            # SELECT
-            while node.expanded():
-                action, node = self.select_child(node)
-                search_path.append(node)
-
-            parent = search_path[-2]
-            state = parent.state
-            # Now we're at a leaf node and we would like to expand
-            # Players always play from their own perspective
-            next_state, _ = self.game.get_next_state(state, player=1, action=action)
-            # Get the board from the perspective of the other player
-            next_state = self.game.get_canonical_board(next_state, player=-1)
-
-            # The value of the new state from the perspective of the other player
-            value = self.game.get_reward_for_player(next_state, player=1)
-            if value is None:
-                # If the game has not ended, expand the node
-                action_probs, value = self.get_prob_and_value(next_state)
-                self.expand(node, next_state, parent.to_play * -1, action_probs)
-
-            self.backpropagate(search_path, value, parent.to_play * -1)
-
-        return root
-
-    def select_child(self, node):
+    def select(self, node):
         """
         Select the child with the highest UCB score.
         """
-        best_score = -np.inf
-        best_action = -1
-        best_child = None
+        total_visits = sum(child.visit_count for child in node.children.values())
+        best_score = -float('inf')
+        best_action = None
 
         for action, child in node.children.items():
-            score = self.ucb_score(node, child)
-            if score > best_score:
-                best_score = score
+            q_value = -child.value()  # negative because we switch perspectives
+            ucb_score = q_value + self.c_puct * child.prior * np.sqrt(total_visits) / (1 + child.visit_count)
+            if ucb_score > best_score:
+                best_score = ucb_score
                 best_action = action
-                best_child = child
 
-        return best_action, best_child
+        return best_action.item() if isinstance(best_action, torch.Tensor) else best_action
 
-    def expand(self, node, state, to_play, action_probs):
-        """
-        We expand a node and keep track of the prior policy probability given by neural network
-        """
-        node.to_play = to_play
-        node.state = state
-        for a, prob in enumerate(action_probs):
-            if prob != 0:
-                node.children[a] = Node(prior=prob, to_play=node.to_play * -1)
+    def run(self, state):
+        root = Node(0)
+        root.state = state
+        self.expand_node(root, state)
 
-    def backpropagate(self, search_path, value, to_play):
+        for i in range(self.num_simulations):
+            node = root
+            search_path = [node]
+
+            # search through tree based on UCB scores until we reach a leaf node
+            while node.expanded():
+                action = self.select(node)
+                node = node.children[action]
+                search_path.append(node)
+
+            # Expansion of leaf node
+            parent_state = search_path[-2].state
+            if node.state is None: # if state not yet set
+                leaf_state = self.game.get_next_state(parent_state, action)
+                node.update_state(leaf_state)
+            else:
+                leaf_state = node.state
+
+            terminal_reward = self.game.check_winner(leaf_state) # returns None if not terminal, else reward for current player
+            if terminal_reward is not None:
+                # If the game has ended at this leaf node
+                value = terminal_reward
+            else:
+                # If the game has not ended, use the model to get priors and value
+                value = self.expand_node(node, leaf_state)
+
+            # Backpropagation
+            self.backpropagate(search_path, value)
+
+        return root
+
+    def expand_node(self, node, state):
         """
-        At the end of a simulation, we propagate the evaluation all the way up the tree
-        to the root.
+        Expand the node with legal actions and their prior probabilities.
+        """
+        with torch.no_grad():
+            priors, value = self.model(state)
+        legal_actions = self.game.get_legal_actions(state)
+        node.expand(legal_actions, priors)
+        return value
+
+    @staticmethod
+    def backpropagate(search_path, value):
+        """
+        Backpropagate the value up the search path.
         """
         for node in reversed(search_path):
-            node.value_sum += value if node.to_play == to_play else -value
             node.visit_count += 1
-
-    def get_prob_and_value(self, state):
-        with torch.no_grad():
-            action_probs, value = self.model.predict(state)
-        valid_moves = self.game.get_valid_moves(state)
-        action_probs = action_probs * valid_moves  # mask invalid moves
-        action_probs /= np.sum(action_probs)
-        return action_probs, value
-
-
-    def ucb_score(self, parent, child):
-        '''
-        Score based on Upper Confidence Bound = Q(s,a) + U(s,a)
-        where Q(s,a) is the value of the child node, and U(s,a) is an exploration term
-        U(s,a) = c_puct * P(s,a) * sqrt(N(s)) / (1 + N(s,a))
-        '''
-        U = self.c_puct * child.prior * math.sqrt(parent.visit_count) / (child.visit_count + 1)
-        if child.visit_count > 0:
-            # The value of the child is from the perspective of the opposing player
-            Q = -child.value()
-        else:
-            Q = 0
-
-        return Q + U
-
-
+            node.value_sum += value
+            value = -value  # switch perspective for the opponent assuming two-player zero-sum game
