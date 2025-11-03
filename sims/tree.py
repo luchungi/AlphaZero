@@ -59,6 +59,18 @@ class Node:
         else:
             return None
 
+    def sample_action(self):
+        """
+        Sample an action according to the visit counts of child nodes.
+        """
+        if self.expanded():
+            visit_counts = np.array([child.visit_count for child in self.children.values()])
+            actions = list(self.children.keys())
+            probabilities = visit_counts / visit_counts.sum()
+            return np.random.choice(actions, p=probabilities)
+        else:
+            return None
+
     def __repr__(self):
         """
         Debugger pretty print node info
@@ -121,7 +133,7 @@ class MCTS:
             else:
                 leaf_state = node.state
 
-            terminal_reward = self.game.check_winner(leaf_state) # returns None if not terminal, else reward for current player
+            terminal_reward = self.game.reward(leaf_state) # returns None if not terminal, else reward for current player
             if terminal_reward is not None:
                 # If the game has ended at this leaf node
                 value = terminal_reward

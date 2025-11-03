@@ -3,6 +3,9 @@ import numpy as np
 
 DTYPE = torch.float32
 REQUIRES_GRAD = False
+NUM_ROUNDS_IDX = 4  # Index of number of rounds in state tensor
+CURR_PLAYER_IDX = 5  # Index of current player in state tensor
+NUM_ACTIONS = 10  # 6 tap actions + 4 split actions
 
 class ChopsticksGame:
     '''
@@ -16,6 +19,7 @@ class ChopsticksGame:
     You can only split if it results in a different configuration (mirror images not allowed).
     Splits must result in both hands having at least 1 finger.
     Winner is the player who makes the opponent lose both hands.
+    Game is a draw if no winner is decided within a set number of moves.
     State is represented as a 1D torch tensor of int type: (p1_left, p1_right, p2_left, p2_right, current_player)
     current_player is 0 (p1) or 1 (p2) indicating whose turn it is.
     Actions are represented as integers from 0 to 9:
@@ -32,27 +36,29 @@ class ChopsticksGame:
         8: Split current fingers with left hand having 3 fingers
         9: Split current fingers with left hand having 4 fingers
     '''
-    def __init__(self):
-        self.state = torch.tensor([1, 1, 1, 1, 0], dtype=DTYPE, requires_grad=REQUIRES_GRAD)  # Initial state
+    def __init__(self, draw_limit=100):
+        self.draw_limit = draw_limit
+        self.state = torch.tensor([1, 1, 1, 1, 0, 0], dtype=DTYPE, requires_grad=REQUIRES_GRAD)
 
     def reset(self):
-        self.state = torch.tensor([1, 1, 1, 1, 0], dtype=DTYPE, requires_grad=REQUIRES_GRAD)
+        self.state = torch.tensor([1, 1, 1, 1, 0, 0], dtype=DTYPE, requires_grad=REQUIRES_GRAD)
         return self.state
 
     def play(self, action):
-        self.state = ChopsticksGame.get_next_state(self.state, action)
-        winner = ChopsticksGame.check_winner(self.state)
-        if winner is None:
+        self.state = self.get_next_state(self.state, action)
+        reward = self.reward(self.state)
+        if reward is None:
             return True # Game continues
         else:
             return False # Game ended
 
-    @staticmethod
-    def action_size():
-        return 10  # 6 tap actions + 4 split actions
+    def state_dim(self):
+        return self.state.shape[0]
 
-    @staticmethod
-    def check_winner(state):
+    def num_actions(self):
+        return NUM_ACTIONS  # 6 tap actions + 4 split actions
+
+    def reward(self, state):
         '''
         Check if there is a winner in the current state.
         Returns:
@@ -63,26 +69,28 @@ class ChopsticksGame:
         we return -1 to indicate the current player has lost.
         There are no draws in Chopsticks.
         '''
-        curr = state[4].item()
+        curr = state[CURR_PLAYER_IDX].item()
         p1_hands = state[0:2]
         p2_hands = state[2:4]
         if p1_hands.sum() == 0:
             if curr == 0:
-                return -1 # Player 2 wins
+                return -1. # Player 2 wins
             else:
                 raise ValueError("Invalid state: Player 1 has lost but it is not player 1's turn.")
         elif p2_hands.sum() == 0:
             if curr == 1:
-                return -1  # Player 1 wins
+                return -1.  # Player 1 wins
             else:
                 raise ValueError("Invalid state: Player 2 has lost but it is not player 2's turn.")
+        elif state[NUM_ROUNDS_IDX] == self.draw_limit:
+            return 0.  # Draw
         else:
             return None  # No winner yet
 
     @staticmethod
     def get_legal_actions(state):
         fingers = state[:4].view((2,2))  # Reshape to 2x2 for easier indexing
-        curr = int(state[4].item())
+        curr = int(state[CURR_PLAYER_IDX].item())
         legal_actions = []
         if not (fingers[curr,0] == 0 or fingers[1-curr,0] == 0):
             legal_actions.append(0)  # curr_left taps oppo_left
@@ -116,7 +124,7 @@ class ChopsticksGame:
 
         state = state.clone()  # Clone to avoid modifying original state
         fingers = state[:4].view((2,2))  # Reshape to 2x2 for easier indexing
-        curr = int(state[4].item())
+        curr = int(state[CURR_PLAYER_IDX].item())
         if action == 0:
             fingers[1-curr,0] += fingers[curr,0]
         elif action == 1:
@@ -139,7 +147,8 @@ class ChopsticksGame:
         state[:4] = fingers.view(-1)  # Update fingers and mod 5
         state[:4] = torch.minimum(state[:4], torch.tensor(5))  # Cap at 5 fingers
         state[:4] = state[:4] % 5
-        state[-1] = 1 - state[-1]  # Switch current player
+        state[NUM_ROUNDS_IDX] += 1  # Increment number of rounds
+        state[CURR_PLAYER_IDX] = 1 - state[CURR_PLAYER_IDX]  # Switch current player
         return state
 
     @staticmethod
@@ -168,22 +177,22 @@ class ChopsticksGame:
     @staticmethod
     def print_state(state, label=""):
         """Print the state in a readable format."""
-        p1_left, p1_right, p2_left, p2_right, curr_player = state.to(torch.int32).tolist()
+        p1_left, p1_right, p2_left, p2_right, num_rounds_played, curr_player = state.to(torch.int32).tolist()
         player = "P1" if curr_player == 0 else "P2"
         print(f"{label}")
+        print(f"  Rounds Played: {num_rounds_played}")
         print(f"  P1: Left={p1_left}, Right={p1_right}")
         print(f"  P2: Left={p2_left}, Right={p2_right}")
         print(f"  Current Player: {player}")
 
     @staticmethod
-    def print_winner_result(winner):
+    def print_winner_result(reward, state):
         """Print the winner result in a readable format."""
-        if winner is None:
+        if reward is None:
             print("  Winner: None (Game continues)")
-        elif winner == 0:
-            print("  Winner: Player 1 wins!")
-        elif winner == 1:
-            print("  Winner: Player 2 wins!")
+        elif reward == -1:
+            print(f"  Winner: Player {2 - state[CURR_PLAYER_IDX].item()}")
+
 
     def test_get_next_state(self):
         """Test the get_next_state function with various scenarios following game rules."""
@@ -570,19 +579,19 @@ class ChopsticksGame:
         print("TEST SUITE COMPLETED")
         print("="*70)
 
-    def test_check_winner(self):
-        """Test the check_winner function with various scenarios."""
+    def test_reward(self):
+        """Test the reward function with various scenarios."""
 
         print("="*70)
-        print("CHOPSTICKS GAME - check_winner() TEST CASES")
+        print("CHOPSTICKS GAME - reward() TEST CASES")
         print("="*70)
 
         # Test 1: Initial state - no winner
         print("\n--- TEST 1: Initial state - no winner ---")
         state = torch.tensor([1, 1, 1, 1, 0], dtype=torch.int32)
         self.print_state(state, "State:")
-        winner = ChopsticksGame.check_winner(state)
-        self.print_winner_result(winner)
+        reward = ChopsticksGame.reward(state)
+        self.print_winner_result(reward, state)
 
         # Test 2: P1 kills P2's last hand - P1 wins
         print("\n--- TEST 2: P1 kills P2's last hand (winning move) ---")
@@ -591,8 +600,8 @@ class ChopsticksGame:
         print(f"Action: {self.describe_action(1)}")
         state = ChopsticksGame.get_next_state(state, 1)
         self.print_state(state, "After Action:")
-        winner = ChopsticksGame.check_winner(state)
-        self.print_winner_result(winner)
+        reward = ChopsticksGame.reward(state)
+        self.print_winner_result(reward, state)
 
         # Test 3: P2 kills P1's last hand - P2 wins
         print("\n--- TEST 3: P2 kills P1's last hand (winning move) ---")
@@ -601,8 +610,8 @@ class ChopsticksGame:
         print(f"Action: {self.describe_action(4)}")
         state = ChopsticksGame.get_next_state(state, 4)
         self.print_state(state, "After Action:")
-        winner = ChopsticksGame.check_winner(state)
-        self.print_winner_result(winner)
+        reward = ChopsticksGame.reward(state)
+        self.print_winner_result(reward, state)
 
         # Test 4: P1 kills one of P2's hands but P2 still has one alive - no winner
         print("\n--- TEST 4: P1 kills one hand but P2 still has another - no winner ---")
@@ -611,8 +620,8 @@ class ChopsticksGame:
         print(f"Action: {self.describe_action(0)}")
         state = ChopsticksGame.get_next_state(state, 0)
         self.print_state(state, "After Action:")
-        winner = ChopsticksGame.check_winner(state)
-        self.print_winner_result(winner)
+        reward = ChopsticksGame.reward(state)
+        self.print_winner_result(reward, state)
 
         # Test 5: P2 kills one of P1's hands but P1 still has one alive - no winner
         print("\n--- TEST 5: P2 kills one hand but P1 still has another - no winner ---")
@@ -621,8 +630,8 @@ class ChopsticksGame:
         print(f"Action: {self.describe_action(0)}")
         state = ChopsticksGame.get_next_state(state, 0)
         self.print_state(state, "After Action:")
-        winner = ChopsticksGame.check_winner(state)
-        self.print_winner_result(winner)
+        reward = ChopsticksGame.reward(state)
+        self.print_winner_result(reward, state)
 
         # Test 6: P1 kills both P2 hands in final move - P1 wins
         print("\n--- TEST 6: P1 kills P2's only remaining hand - P1 wins ---")
@@ -631,8 +640,8 @@ class ChopsticksGame:
         print(f"Action: {self.describe_action(1)}")
         state = ChopsticksGame.get_next_state(state, 1)
         self.print_state(state, "After Action:")
-        winner = ChopsticksGame.check_winner(state)
-        self.print_winner_result(winner)
+        reward = ChopsticksGame.reward(state)
+        self.print_winner_result(reward, state)
 
         # Test 7: P2 kills both P1 hands in final move - P2 wins
         print("\n--- TEST 7: P2 kills P1's only remaining hand - P2 wins ---")
@@ -641,8 +650,8 @@ class ChopsticksGame:
         print(f"Action: {self.describe_action(4)}")
         state = ChopsticksGame.get_next_state(state, 4)
         self.print_state(state, "After Action:")
-        winner = ChopsticksGame.check_winner(state)
-        self.print_winner_result(winner)
+        reward = ChopsticksGame.reward(state)
+        self.print_winner_result(reward, state)
 
         # Test 8: Game in progress with both players having both hands alive - no winner
         print("\n--- TEST 8: Both players have both hands alive - no winner ---")
@@ -651,8 +660,8 @@ class ChopsticksGame:
         print(f"Action: {self.describe_action(0)}")
         state = ChopsticksGame.get_next_state(state, 0)
         self.print_state(state, "After Action:")
-        winner = ChopsticksGame.check_winner(state)
-        self.print_winner_result(winner)
+        reward = ChopsticksGame.reward(state)
+        self.print_winner_result(reward, state)
 
         # Test 9: P1 has one hand dead but still alive - no winner
         print("\n--- TEST 9: P1 has one dead hand but still alive - no winner ---")
@@ -661,8 +670,8 @@ class ChopsticksGame:
         print(f"Action: {self.describe_action(3)}")
         state = ChopsticksGame.get_next_state(state, 3)
         self.print_state(state, "After Action:")
-        winner = ChopsticksGame.check_winner(state)
-        self.print_winner_result(winner)
+        reward = ChopsticksGame.reward(state)
+        self.print_winner_result(reward, state)
 
         # Test 10: P2 has one hand dead but still alive - no winner
         print("\n--- TEST 10: P2 has one dead hand but still alive - no winner ---")
@@ -671,8 +680,8 @@ class ChopsticksGame:
         print(f"Action: {self.describe_action(3)}")
         state = ChopsticksGame.get_next_state(state, 3)
         self.print_state(state, "After Action:")
-        winner = ChopsticksGame.check_winner(state)
-        self.print_winner_result(winner)
+        reward = ChopsticksGame.reward(state)
+        self.print_winner_result(reward, state)
 
         # Test 11: P1 causes overflow killing P2's hand and winning
         print("\n--- TEST 11: P1 causes overflow (4+4=8->3) then later wins ---")
@@ -681,8 +690,8 @@ class ChopsticksGame:
         print(f"Action: {self.describe_action(1)}")
         state = ChopsticksGame.get_next_state(state, 1)
         self.print_state(state, "After Action:")
-        winner = ChopsticksGame.check_winner(state)
-        self.print_winner_result(winner)
+        reward = ChopsticksGame.reward(state)
+        self.print_winner_result(reward, state)
 
         # Test 12: Self-tap scenario - no winner
         print("\n--- TEST 12: P1 self-taps - no winner ---")
@@ -691,8 +700,8 @@ class ChopsticksGame:
         print(f"Action: {self.describe_action(2)}")
         state = ChopsticksGame.get_next_state(state, 2)
         self.print_state(state, "After Action:")
-        winner = ChopsticksGame.check_winner(state)
-        self.print_winner_result(winner)
+        reward = ChopsticksGame.reward(state)
+        self.print_winner_result(reward, state)
 
         # Test 13: P2 self-tap resulting in death but not losing - no winner
         print("\n--- TEST 13: P2 self-taps killing own hand but not losing - no winner ---")
@@ -701,8 +710,8 @@ class ChopsticksGame:
         print(f"Action: {self.describe_action(5)}")
         state = ChopsticksGame.get_next_state(state, 5)
         self.print_state(state, "After Action:")
-        winner = ChopsticksGame.check_winner(state)
-        self.print_winner_result(winner)
+        reward = ChopsticksGame.reward(state)
+        self.print_winner_result(reward, state)
 
         # Test 14: P1 wins with exact hit (4+1=5->0)
         print("\n--- TEST 14: P1 wins with exact hit killing last hand ---")
@@ -711,8 +720,8 @@ class ChopsticksGame:
         print(f"Action: {self.describe_action(1)}")
         state = ChopsticksGame.get_next_state(state, 1)
         self.print_state(state, "After Action:")
-        winner = ChopsticksGame.check_winner(state)
-        self.print_winner_result(winner)
+        reward = ChopsticksGame.reward(state)
+        self.print_winner_result(reward, state)
 
         # Test 15: P2 wins with exact hit (3+2=5->0)
         print("\n--- TEST 15: P2 wins with exact hit killing last hand ---")
@@ -721,8 +730,8 @@ class ChopsticksGame:
         print(f"Action: {self.describe_action(4)}")
         state = ChopsticksGame.get_next_state(state, 4)
         self.print_state(state, "After Action:")
-        winner = ChopsticksGame.check_winner(state)
-        self.print_winner_result(winner)
+        reward = ChopsticksGame.reward(state)
+        self.print_winner_result(reward, state)
 
         # Test 16: Split action - no winner
         print("\n--- TEST 16: P1 splits fingers - no winner ---")
@@ -731,8 +740,8 @@ class ChopsticksGame:
         print(f"Action: {self.describe_action(7)}")
         state = ChopsticksGame.get_next_state(state, 7)
         self.print_state(state, "After Action:")
-        winner = ChopsticksGame.check_winner(state)
-        self.print_winner_result(winner)
+        reward = ChopsticksGame.reward(state)
+        self.print_winner_result(reward, state)
 
         # Test 17: P2 split resurrects hand - no winner
         print("\n--- TEST 17: P2 resurrects dead hand via split - no winner ---")
@@ -741,8 +750,8 @@ class ChopsticksGame:
         print(f"Action: {self.describe_action(7)}")
         state = ChopsticksGame.get_next_state(state, 7)
         self.print_state(state, "After Action:")
-        winner = ChopsticksGame.check_winner(state)
-        self.print_winner_result(winner)
+        reward = ChopsticksGame.reward(state)
+        self.print_winner_result(reward, state)
 
         # Test 18: Regular tap that doesn't kill - no winner
         print("\n--- TEST 18: Regular tap with no kill - no winner ---")
@@ -751,8 +760,8 @@ class ChopsticksGame:
         print(f"Action: {self.describe_action(0)}")
         state = ChopsticksGame.get_next_state(state, 0)
         self.print_state(state, "After Action:")
-        winner = ChopsticksGame.check_winner(state)
-        self.print_winner_result(winner)
+        reward = ChopsticksGame.reward(state)
+        self.print_winner_result(reward, state)
 
         # Test 19: P1 kills P2's second-to-last hand - no winner yet
         print("\n--- TEST 19: P1 kills one hand when opponent has two - no winner ---")
@@ -761,8 +770,8 @@ class ChopsticksGame:
         print(f"Action: {self.describe_action(0)}")
         state = ChopsticksGame.get_next_state(state, 0)
         self.print_state(state, "After Action:")
-        winner = ChopsticksGame.check_winner(state)
-        self.print_winner_result(winner)
+        reward = ChopsticksGame.reward(state)
+        self.print_winner_result(reward, state)
 
         # Test 20: P1 makes winning move from strong position
         print("\n--- TEST 20: P1 wins from strong position ---")
@@ -771,8 +780,8 @@ class ChopsticksGame:
         print(f"Action: {self.describe_action(1)}")
         state = ChopsticksGame.get_next_state(state, 1)
         self.print_state(state, "After Action:")
-        winner = ChopsticksGame.check_winner(state)
-        self.print_winner_result(winner)
+        reward = ChopsticksGame.reward(state)
+        self.print_winner_result(reward, state)
 
         print("\n" + "="*70)
         print("TEST SUITE COMPLETED")
