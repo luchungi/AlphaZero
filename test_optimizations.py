@@ -156,6 +156,36 @@ def test_virtual_loss_mcts():
     print("✓ Virtual loss MCTS tests passed")
 
 
+def test_cached_model_with_mcts():
+    """Test CachedBatchedModel with VirtualLossMCTS (notebook usage)."""
+    print("\nTesting CachedBatchedModel with VirtualLossMCTS...")
+
+    game = ChopsticksGame()
+    model = ChopsticksMLP(input_size=6, output_size=10, hidden_size=64)
+    cached_model = CachedBatchedModel(model, device='cpu', cache_size=1000)
+
+    config = {
+        'c_puct': 1.0,
+        'num_simulations': 50,
+        'batch_size': 8,
+        'virtual_loss': 3,
+    }
+
+    mcts = VirtualLossMCTS(game, cached_model, config)
+
+    state = game.reset()
+    root = mcts.run(state)
+
+    assert root.visit_count > 0
+    assert len(root.children) > 0
+
+    # Check cache is being used
+    stats = cached_model.get_cache_stats()
+    assert stats['size'] > 0, "Cache should have entries"
+
+    print(f"✓ CachedBatchedModel with MCTS tests passed (cache size: {stats['size']})")
+
+
 def test_self_play_parallel():
     """Test parallel self-play."""
     print("\nTesting parallel self-play...")
@@ -282,6 +312,7 @@ def run_all_tests():
         test_cached_model()
         test_parallel_mcts()
         test_virtual_loss_mcts()
+        test_cached_model_with_mcts()
         test_self_play_parallel()
         test_training_dataloader()
 

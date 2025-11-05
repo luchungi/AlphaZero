@@ -148,6 +148,43 @@ class CachedBatchedModel:
 
         return policies, values
 
+    @torch.no_grad()
+    def predict_single(self, state):
+        """
+        Predict for a single state with caching.
+
+        Args:
+            state: (state_dim,) tensor
+
+        Returns:
+            policy: (num_actions,) tensor of action probabilities
+            value: scalar tensor
+        """
+        key = self._state_to_key(state)
+
+        # Check cache
+        if key in self.cache:
+            policy, value = self.cache[key]
+            self.cache_hits += 1
+            return policy.to(self.device), value.to(self.device)
+
+        # Cache miss - predict
+        self.cache_misses += 1
+        state_batch = state.unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            policy, value = self.model(state_batch)
+
+        policy = policy.squeeze(0)
+        value = value.squeeze(0)
+
+        # Add to cache
+        if len(self.cache) >= self.cache_size:
+            self.cache.clear()
+
+        self.cache[key] = (policy.cpu(), value.cpu())
+
+        return policy, value
+
     def clear_cache(self):
         """Clear the prediction cache."""
         self.cache.clear()
