@@ -1,4 +1,6 @@
 # AlphaZero
-Build AlphaZero that mastered Go and other perfect information zero sum games
+Build algorithm based on AlphaZero which uses Monte Carlo Tree Search combined
+with neural network based policy and value function to play two player zero sum games.
+Test algorithm based on game of Chopsticks
 
-Based on code from https://github.com/JoshVarty/AlphaZeroSimple/
+Modified code from https://github.com/JoshVarty/AlphaZeroSimple/
